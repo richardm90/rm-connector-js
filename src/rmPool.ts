@@ -79,9 +79,11 @@ class RmPool extends EventEmitter {
    * Initializes the RmPool instance.
    */
   async init(): Promise<void> {
+    const promises: Promise<RmPoolConnection>[] = [];
     for (let i = 0; i < this.initialConnections.size!; i += 1) {
-      await this.createConnection(this.initialConnections.expiry);
+      promises.push(this.createConnection(this.initialConnections.expiry));
     }
+    await Promise.all(promises);
 
     this.rmLogger.debug(`Connection pool initialized`);
     this.emit('pool:initialized', { poolId: this.id, connections: this.connections.length });
@@ -265,26 +267,30 @@ class RmPool extends EventEmitter {
 
       this.rmLogger.debug('No available connections found');
 
-      let increasedConnections = 0;
-      for (i = 0; i < size; i += 1) {
-        if (this.connections.length >= this.maxSize) {
-          const msg = `Maximum number of connections (${this.connections.length}) reached`;
-          this.rmLogger.debug(msg);
-          this.emit('pool:exhausted', { poolId: this.id, maxSize: this.maxSize });
-          if (increasedPoolSize) {
-            break;
-          } else {
-            throw new Error(msg);
-          }
+      const available = this.maxSize - this.connections.length;
+      if (available <= 0) {
+        const msg = `Maximum number of connections (${this.connections.length}) reached`;
+        this.rmLogger.debug(msg);
+        this.emit('pool:exhausted', { poolId: this.id, maxSize: this.maxSize });
+        if (increasedPoolSize) {
+          // already grew once this attach cycle — loop back to find one
+        } else {
+          throw new Error(msg);
         }
+      }
 
-        connection = await this.createConnection(this.incrementConnections.expiry);
-        increasedConnections += 1;
+      const toCreate = Math.min(size, available);
+      if (toCreate > 0) {
+        const promises: Promise<RmPoolConnection>[] = [];
+        for (i = 0; i < toCreate; i += 1) {
+          promises.push(this.createConnection(this.incrementConnections.expiry));
+        }
+        await Promise.all(promises);
         increasedPoolSize = true;
       }
 
       if (increasedPoolSize) {
-        this.rmLogger.debug(`Increased connections by ${increasedConnections} to ${this.connections.length} (total)`);
+        this.rmLogger.debug(`Increased connections by ${toCreate} to ${this.connections.length} (total)`);
       }
     }
 
