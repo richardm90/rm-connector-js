@@ -19,7 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Mapepire backend now logs `Connected (@ibm/mapepire-js)` (was `Connected`)
+- Mapepire backend now logs `Connected (mapepire-js)` (was `Connected`)
 - New examples: `standalone-connection.js`, `custom-logger.js`, `error-handling.js`
 - `BACKEND-DIFFERENCES.md` — comprehensive comparison of idb vs mapepire backend behaviour
 - Test for per-pool logger override
