@@ -281,6 +281,112 @@ describeIf('Backend Parity', () => {
     });
   });
 
+  // ----- JDBCOptions: multiple libraries -----
+
+  describe('JDBCOptions: multiple libraries', () => {
+    const TEST_LIB = 'PARITYTEST';
+
+    // Setup: create a test library with a table and seed data
+    beforeAll(async () => {
+      const setup = new RmConnection({ backend: 'idb' });
+      await setup.init(true);
+      try {
+        // Create library (ignore error if it already exists)
+        try {
+          await setup.execute('CALL QSYS2.QCMDEXC(?)', { parameters: [`CRTLIB LIB(${TEST_LIB}) TEXT('Parity test library')`] });
+        } catch (e: any) {
+          // CPF2111 = library already exists
+          if (!e?.message?.includes('CPF2111')) throw e;
+        }
+        // Create and populate test table
+        await setup.execute(`CREATE OR REPLACE TABLE ${TEST_LIB}.PRODUCTS (
+          PRODID INT NOT NULL, PRODNAME VARCHAR(30), PRICE DECIMAL(9,2)
+        )`);
+        await setup.execute(`DELETE FROM ${TEST_LIB}.PRODUCTS`);
+        await setup.execute(`INSERT INTO ${TEST_LIB}.PRODUCTS VALUES (1, 'Widget', 9.99)`);
+        await setup.execute(`INSERT INTO ${TEST_LIB}.PRODUCTS VALUES (2, 'Gadget', 24.50)`);
+        await setup.execute(`INSERT INTO ${TEST_LIB}.PRODUCTS VALUES (3, 'Sprocket', 3.75)`);
+      } finally {
+        await setup.close();
+      }
+    });
+
+    // Teardown: drop table and delete library
+    afterAll(async () => {
+      const teardown = new RmConnection({ backend: 'idb' });
+      await teardown.init(true);
+      try {
+        await teardown.execute(`DROP TABLE ${TEST_LIB}.PRODUCTS`);
+        await teardown.execute('CALL QSYS2.QCMDEXC(?)', { parameters: [`DLTLIB LIB(${TEST_LIB})`] });
+      } catch (e) {
+        // Best-effort cleanup
+      } finally {
+        await teardown.close();
+      }
+    });
+
+    it('should resolve unqualified table from custom library', async () => {
+      await withBothBackends(
+        { JDBCOptions: { libraries: [TEST_LIB] } },
+        async (idb, mapepire) => {
+          const sql = 'SELECT PRODID, PRODNAME, PRICE FROM PRODUCTS ORDER BY PRODID';
+
+          const [idbRes, mapRes] = await Promise.all([idb.execute(sql), mapepire.execute(sql)]);
+
+          expect(normalise(idbRes)).toEqual(normalise(mapRes));
+          expect(idbRes.data.length).toBe(3);
+        },
+      );
+    });
+
+    it('should resolve tables from multiple libraries', async () => {
+      await withBothBackends(
+        { JDBCOptions: { libraries: [TEST_LIB, 'QIWS'] } },
+        async (idb, mapepire) => {
+          // Query from PARITYTEST (unqualified)
+          const prodSql = 'SELECT PRODID, PRODNAME FROM PRODUCTS ORDER BY PRODID';
+          const [idbProd, mapProd] = await Promise.all([idb.execute(prodSql), mapepire.execute(prodSql)]);
+          expect(normalise(idbProd)).toEqual(normalise(mapProd));
+
+          // Query from QIWS (unqualified)
+          const custSql = 'SELECT CUSNUM, LSTNAM FROM QCUSTCDT ORDER BY CUSNUM FETCH FIRST 3 ROWS ONLY';
+          const [idbCust, mapCust] = await Promise.all([idb.execute(custSql), mapepire.execute(custSql)]);
+          expect(normalise(idbCust)).toEqual(normalise(mapCust));
+        },
+      );
+    });
+
+    it('should resolve with system naming and multiple libraries', async () => {
+      await withBothBackends(
+        { JDBCOptions: { libraries: [TEST_LIB, 'QIWS'], naming: 'system' } },
+        async (idb, mapepire) => {
+          // Unqualified access to PARITYTEST table
+          const sql = 'SELECT PRODID, PRODNAME, PRICE FROM PRODUCTS ORDER BY PRODID';
+
+          const [idbRes, mapRes] = await Promise.all([idb.execute(sql), mapepire.execute(sql)]);
+
+          expect(normalise(idbRes)).toEqual(normalise(mapRes));
+        },
+      );
+    });
+
+    it('library order should determine resolution priority', async () => {
+      // Both backends should resolve from the same library when multiple are listed
+      await withBothBackends(
+        { JDBCOptions: { libraries: ['QIWS', TEST_LIB] } },
+        async (idb, mapepire) => {
+          // PRODUCTS only exists in PARITYTEST, so both should find it
+          const sql = 'SELECT PRODID, PRODNAME FROM PRODUCTS ORDER BY PRODID';
+
+          const [idbRes, mapRes] = await Promise.all([idb.execute(sql), mapepire.execute(sql)]);
+
+          expect(normalise(idbRes)).toEqual(normalise(mapRes));
+          expect(idbRes.data.length).toBe(3);
+        },
+      );
+    });
+  });
+
   // ----- JDBCOptions: naming -----
 
   describe('JDBCOptions: naming', () => {
