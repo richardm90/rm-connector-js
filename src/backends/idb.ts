@@ -61,7 +61,7 @@ export class IdbBackend implements BackendConnection {
     this.status = 'connecting';
 
     // Apply JDBCOptions (connection attributes + SQL-based options)
-    this.applyJDBCOptions();
+    await this.applyJDBCOptions();
 
     this.status = 'ready';
 
@@ -204,7 +204,7 @@ export class IdbBackend implements BackendConnection {
     }
   }
 
-  private applyJDBCOptions(): void {
+  private async applyJDBCOptions(): Promise<void> {
     const opts = this.JDBCOptions as any;
     const {
       SQL_ATTR_COMMIT,
@@ -258,11 +258,26 @@ export class IdbBackend implements BackendConnection {
     }
 
     // Libraries
+    // Mapepire/JDBC behaviour:
+    //   SQL naming:    first library becomes the default schema; additional libraries are
+    //                  not searchable via unqualified references.
+    //   System naming: all libraries are added to the job library list (*LIBL).
+    // We replicate this so both backends behave identically.
     if (opts.libraries) {
       const libs = Array.isArray(opts.libraries) ? opts.libraries : [opts.libraries];
       if (libs.length > 0) {
-        this.conn.setLibraryList(libs);
-        this.rmLogger.debug(`Set library list: ${libs.join(', ')}`);
+        const isSystemNaming = opts.naming === 'system';
+        if (isSystemNaming) {
+          this.conn.setLibraryList(libs);
+          this.rmLogger.debug(`Set library list: ${libs.join(', ')}`);
+        } else {
+          // SQL naming: set first library as default schema (matches mapepire)
+          await this.execSimple(`SET SCHEMA ${libs[0]}`);
+          this.rmLogger.debug(`Set default schema: ${libs[0]}`);
+          if (libs.length > 1) {
+            this.rmLogger.debug(`Libraries beyond first (${libs.slice(1).join(', ')}) are not searchable under SQL naming — use qualified references or switch to system naming`);
+          }
+        }
       }
     }
 

@@ -57,12 +57,23 @@ This document details the differences between the two backends based on testing 
 | Feature | idb | mapepire |
 |---|---|---|
 | **Keepalive** | Automatically disabled (no WebSocket) | Supported (ping via `VALUES 1`) |
-| **JDBCOptions `libraries`** | Mapped to `setLibraryList()` | Native JDBC support |
+| **JDBCOptions `libraries`** | SQL naming: `SET SCHEMA` (first lib only); system naming: `setLibraryList()` (all libs) | Native JDBC support (same behaviour) |
 | **JDBCOptions `naming`** | Mapped to `setConnAttr(SQL_ATTR_DBC_SYS_NAMING)` | Native JDBC support |
 | **JDBCOptions `transaction isolation`** | Mapped to `setConnAttr(SQL_ATTR_COMMIT)` | Native JDBC support |
 | **JDBCOptions `auto commit`** | Mapped to `setConnAttr(SQL_ATTR_AUTOCOMMIT)` | Native JDBC support |
 | **`SET OPTION` statements** | Not allowed (use `setConnAttr` instead) | Supported via JDBC |
 | **Credentials** | Not needed (connects to `*LOCAL`) | Required (`host`, `user`, `password`) |
+
+## Libraries Behaviour by Naming Mode
+
+The `libraries` JDBCOption behaves differently depending on the `naming` mode:
+
+| Naming | Behaviour | Unqualified table resolution |
+|--------|-----------|------------------------------|
+| `'sql'` (default) | First library becomes the **default schema** | Only searches the first library |
+| `'system'` | All libraries added to the **job library list** (`*LIBL`) | Searches all libraries in order |
+
+Under SQL naming, additional libraries beyond the first are not searchable via unqualified references — use fully qualified names (e.g. `QIWS.QCUSTCDT`) or switch to system naming. Both backends now implement this consistently.
 
 ## Logging & Behaviour
 

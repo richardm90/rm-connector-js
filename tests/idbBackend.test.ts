@@ -121,8 +121,22 @@ describe('IdbBackend', () => {
       expect(conn.setConnAttr).toHaveBeenCalledWith(idbMock.SQL_ATTR_DBC_SYS_NAMING, 0);
     });
 
-    it('should set library list', async () => {
+    it('should set default schema for libraries under SQL naming', async () => {
       const backend = new IdbBackend({ libraries: ['MYLIB', 'TESTLIB'] }, [], rmLogger);
+      await backend.init(true);
+
+      const conn = getLastConnection();
+      // SQL naming (default): first library set via SET SCHEMA, not setLibraryList
+      expect(conn.setLibraryList).not.toHaveBeenCalled();
+      const stmtInstances = (idbMock.MockStatement as any).__instances as any[];
+      const setSchemaStmt = stmtInstances.find((s: any) =>
+        s.exec.mock.calls.some((c: any[]) => c[0] === 'SET SCHEMA MYLIB')
+      );
+      expect(setSchemaStmt).toBeDefined();
+    });
+
+    it('should use setLibraryList for libraries under system naming', async () => {
+      const backend = new IdbBackend({ libraries: ['MYLIB', 'TESTLIB'], naming: 'system' }, [], rmLogger);
       await backend.init(true);
 
       const conn = getLastConnection();
@@ -134,7 +148,13 @@ describe('IdbBackend', () => {
       await backend.init(true);
 
       const conn = getLastConnection();
-      expect(conn.setLibraryList).toHaveBeenCalledWith(['MYLIB']);
+      // SQL naming (default): SET SCHEMA used instead of setLibraryList
+      expect(conn.setLibraryList).not.toHaveBeenCalled();
+      const stmtInstances = (idbMock.MockStatement as any).__instances as any[];
+      const setSchemaStmt = stmtInstances.find((s: any) =>
+        s.exec.mock.calls.some((c: any[]) => c[0] === 'SET SCHEMA MYLIB')
+      );
+      expect(setSchemaStmt).toBeDefined();
     });
 
     it('should not call setLibraryList for empty libraries array', async () => {
