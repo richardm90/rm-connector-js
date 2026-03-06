@@ -13,8 +13,8 @@
  * Run with: npm run test:parity
  */
 
-import RmConnection from '../src/rmConnection';
-import { RmConnectionOptions, RmQueryResult } from '../src/types';
+import RmConnection from '../../src/rmConnection';
+import { RmConnectionOptions, RmQueryResult } from '../../src/types';
 
 // ---------------------------------------------------------------------------
 // Configuration
