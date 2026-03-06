@@ -386,6 +386,175 @@ describeIf('Backend Parity', () => {
     });
   });
 
+  // ----- DML with commitment control -----
+
+  describe('DML with commitment control', () => {
+    // Each test creates its own temp table (DECLARE GLOBAL TEMPORARY TABLE)
+    // which is session-scoped and automatically cleaned up on disconnect.
+
+    it('INSERT with auto commit true', async () => {
+      await withBothBackends(
+        { JDBCOptions: { 'auto commit': true, 'transaction isolation': 'read committed' } },
+        async (idb, mapepire) => {
+          const createSql = `DECLARE GLOBAL TEMPORARY TABLE PARITY_INS (
+            ID INT, NAME VARCHAR(20)
+          ) WITH REPLACE`;
+          const insertSql = 'INSERT INTO SESSION.PARITY_INS VALUES (?, ?)';
+          const selectSql = 'SELECT ID, NAME FROM SESSION.PARITY_INS ORDER BY ID';
+
+          // Create table and insert on both
+          for (const conn of [idb, mapepire]) {
+            await conn.execute(createSql);
+            await conn.execute(insertSql, { parameters: [1, 'Alice'] });
+            await conn.execute(insertSql, { parameters: [2, 'Bob'] });
+          }
+
+          const [idbRes, mapRes] = await Promise.all([
+            idb.execute(selectSql),
+            mapepire.execute(selectSql),
+          ]);
+
+          expect(normalise(idbRes)).toEqual(normalise(mapRes));
+        },
+      );
+    });
+
+    it('UPDATE with auto commit true', async () => {
+      await withBothBackends(
+        { JDBCOptions: { 'auto commit': true, 'transaction isolation': 'read committed' } },
+        async (idb, mapepire) => {
+          const createSql = `DECLARE GLOBAL TEMPORARY TABLE PARITY_UPD (
+            ID INT, NAME VARCHAR(20)
+          ) WITH REPLACE`;
+          const insertSql = 'INSERT INTO SESSION.PARITY_UPD VALUES (?, ?)';
+          const updateSql = 'UPDATE SESSION.PARITY_UPD SET NAME = ? WHERE ID = ?';
+          const selectSql = 'SELECT ID, NAME FROM SESSION.PARITY_UPD ORDER BY ID';
+
+          for (const conn of [idb, mapepire]) {
+            await conn.execute(createSql);
+            await conn.execute(insertSql, { parameters: [1, 'Alice'] });
+            await conn.execute(insertSql, { parameters: [2, 'Bob'] });
+            await conn.execute(updateSql, { parameters: ['Charlie', 2] });
+          }
+
+          const [idbRes, mapRes] = await Promise.all([
+            idb.execute(selectSql),
+            mapepire.execute(selectSql),
+          ]);
+
+          expect(normalise(idbRes)).toEqual(normalise(mapRes));
+        },
+      );
+    });
+
+    it('DELETE with auto commit true', async () => {
+      await withBothBackends(
+        { JDBCOptions: { 'auto commit': true, 'transaction isolation': 'read committed' } },
+        async (idb, mapepire) => {
+          const createSql = `DECLARE GLOBAL TEMPORARY TABLE PARITY_DEL (
+            ID INT, NAME VARCHAR(20)
+          ) WITH REPLACE`;
+          const insertSql = 'INSERT INTO SESSION.PARITY_DEL VALUES (?, ?)';
+          const deleteSql = 'DELETE FROM SESSION.PARITY_DEL WHERE ID = ?';
+          const selectSql = 'SELECT ID, NAME FROM SESSION.PARITY_DEL ORDER BY ID';
+
+          for (const conn of [idb, mapepire]) {
+            await conn.execute(createSql);
+            await conn.execute(insertSql, { parameters: [1, 'Alice'] });
+            await conn.execute(insertSql, { parameters: [2, 'Bob'] });
+            await conn.execute(insertSql, { parameters: [3, 'Charlie'] });
+            await conn.execute(deleteSql, { parameters: [2] });
+          }
+
+          const [idbRes, mapRes] = await Promise.all([
+            idb.execute(selectSql),
+            mapepire.execute(selectSql),
+          ]);
+
+          expect(normalise(idbRes)).toEqual(normalise(mapRes));
+        },
+      );
+    });
+
+    it('INSERT/SELECT with no commit (isolation none)', async () => {
+      await withBothBackends(
+        { JDBCOptions: { 'transaction isolation': 'none' } },
+        async (idb, mapepire) => {
+          const createSql = `DECLARE GLOBAL TEMPORARY TABLE PARITY_NC (
+            ID INT, NAME VARCHAR(20)
+          ) WITH REPLACE`;
+          const insertSql = 'INSERT INTO SESSION.PARITY_NC VALUES (?, ?)';
+          const selectSql = 'SELECT ID, NAME FROM SESSION.PARITY_NC ORDER BY ID';
+
+          for (const conn of [idb, mapepire]) {
+            await conn.execute(createSql);
+            await conn.execute(insertSql, { parameters: [1, 'Alpha'] });
+            await conn.execute(insertSql, { parameters: [2, 'Beta'] });
+          }
+
+          const [idbRes, mapRes] = await Promise.all([
+            idb.execute(selectSql),
+            mapepire.execute(selectSql),
+          ]);
+
+          expect(normalise(idbRes)).toEqual(normalise(mapRes));
+        },
+      );
+    });
+
+    it('INSERT/SELECT with read uncommitted', async () => {
+      await withBothBackends(
+        { JDBCOptions: { 'auto commit': false, 'transaction isolation': 'read uncommitted' } },
+        async (idb, mapepire) => {
+          const createSql = `DECLARE GLOBAL TEMPORARY TABLE PARITY_RU (
+            ID INT, NAME VARCHAR(20)
+          ) WITH REPLACE`;
+          const insertSql = 'INSERT INTO SESSION.PARITY_RU VALUES (?, ?)';
+          const selectSql = 'SELECT ID, NAME FROM SESSION.PARITY_RU ORDER BY ID';
+
+          for (const conn of [idb, mapepire]) {
+            await conn.execute(createSql);
+            await conn.execute(insertSql, { parameters: [1, 'Gamma'] });
+            await conn.execute(insertSql, { parameters: [2, 'Delta'] });
+          }
+
+          const [idbRes, mapRes] = await Promise.all([
+            idb.execute(selectSql),
+            mapepire.execute(selectSql),
+          ]);
+
+          expect(normalise(idbRes)).toEqual(normalise(mapRes));
+        },
+      );
+    });
+
+    it('INSERT/SELECT with serializable', async () => {
+      await withBothBackends(
+        { JDBCOptions: { 'auto commit': false, 'transaction isolation': 'serializable' } },
+        async (idb, mapepire) => {
+          const createSql = `DECLARE GLOBAL TEMPORARY TABLE PARITY_SER (
+            ID INT, NAME VARCHAR(20)
+          ) WITH REPLACE`;
+          const insertSql = 'INSERT INTO SESSION.PARITY_SER VALUES (?, ?)';
+          const selectSql = 'SELECT ID, NAME FROM SESSION.PARITY_SER ORDER BY ID';
+
+          for (const conn of [idb, mapepire]) {
+            await conn.execute(createSql);
+            await conn.execute(insertSql, { parameters: [1, 'Epsilon'] });
+            await conn.execute(insertSql, { parameters: [2, 'Zeta'] });
+          }
+
+          const [idbRes, mapRes] = await Promise.all([
+            idb.execute(selectSql),
+            mapepire.execute(selectSql),
+          ]);
+
+          expect(normalise(idbRes)).toEqual(normalise(mapRes));
+        },
+      );
+    });
+  });
+
   // ----- initCommands -----
 
   describe('initCommands', () => {
