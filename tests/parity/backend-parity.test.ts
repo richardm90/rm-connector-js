@@ -363,11 +363,14 @@ describeIf('Backend Parity', () => {
         { JDBCOptions: { libraries: [TEST_LIB, 'QIWS'], naming: 'system' } },
         async (idb, mapepire) => {
           // Unqualified access resolves from first library
-          const sql = 'SELECT PRODID, PRODNAME, PRICE FROM PRODUCTS ORDER BY PRODID';
+          const prodSql = 'SELECT PRODID, PRODNAME, PRICE FROM PRODUCTS ORDER BY PRODID';
+          const [idbProd, mapProd] = await Promise.all([idb.execute(prodSql), mapepire.execute(prodSql)]);
+          expect(normalise(idbProd)).toEqual(normalise(mapProd));
 
-          const [idbRes, mapRes] = await Promise.all([idb.execute(sql), mapepire.execute(sql)]);
-
-          expect(normalise(idbRes)).toEqual(normalise(mapRes));
+          // Unqualified access resolves from second library via *LIBL
+          const custSql = 'SELECT CUSNUM, LSTNAM FROM QCUSTCDT ORDER BY CUSNUM FETCH FIRST 3 ROWS ONLY';
+          const [idbCust, mapCust] = await Promise.all([idb.execute(custSql), mapepire.execute(custSql)]);
+          expect(normalise(idbCust)).toEqual(normalise(mapCust));
         },
       );
     });
