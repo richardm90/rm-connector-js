@@ -10,15 +10,16 @@
  *   IBMI_HOST=myibmi.com IBMI_USER=ME IBMI_PASSWORD=secret \
  *     node examples/blob-poc-mapepire.js
  *
- *   # Drop the POC table when done:
+ *   # Keep the POC table in place afterwards for independent ACS verification:
  *   IBMI_HOST=... IBMI_USER=... IBMI_PASSWORD=... \
- *     node examples/blob-poc-mapepire.js --drop
+ *     node examples/blob-poc-mapepire.js --keep
  *
  * Override the schema (default QGPL):
  *   BLOB_POC_SCHEMA=MYLIB node examples/blob-poc-mapepire.js
  *
- * The POC leaves the BLOB_POC table in place on success so you can
- * independently verify the bytes via ACS Run SQL Scripts:
+ * By default the POC drops the BLOB_POC table before exiting so the script
+ * is a self-cleaning diagnostic. Pass --keep to leave the two rows in place,
+ * then independently verify the bytes via ACS Run SQL Scripts:
  *   SELECT ID, LENGTH(DATA) AS LEN, HEX(DATA) AS HEX_DATA
  *     FROM <SCHEMA>.BLOB_POC ORDER BY ID;
  *
@@ -44,6 +45,7 @@ if (!creds.host || !creds.user || !creds.password) {
 
 const SCHEMA = process.env.BLOB_POC_SCHEMA || 'QGPL';
 const TABLE = `${SCHEMA}.BLOB_POC`;
+const KEEP_TABLE = process.argv.includes('--keep');
 
 const SHORT_BYTES = Buffer.from([0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0xFF, 0x01, 0x80]);
 const MID_BYTES = Buffer.from('This is a BLOB round-trip test', 'utf8');
@@ -66,6 +68,15 @@ async function insertWithHex(job, id, bytes, label, useUpperCase) {
     throw new Error(
       `INSERT for row ${id} (${label}, ${useUpperCase ? 'UPPER' : 'lower'} hex) failed: ${res.error || JSON.stringify(res)}`,
     );
+  }
+}
+
+async function dropTable(job) {
+  const res = await tryExecute(job, `DROP TABLE ${TABLE}`);
+  if (res.success) {
+    console.log(`Dropped ${TABLE}`);
+  } else {
+    console.log(`DROP TABLE returned: ${res.error || JSON.stringify(res)}`);
   }
 }
 
@@ -154,43 +165,25 @@ async function runPoc() {
 
     console.log('\nPASS — in-script round-trip matches on both rows.');
     console.log(`\nHex case accepted by mapepire: ${usedCase}case`);
-    console.log('\nIndependent verification — run in ACS Run SQL Scripts:');
-    console.log(`  SELECT ID, LENGTH(DATA) AS LEN, HEX(DATA) AS HEX_DATA`);
-    console.log(`    FROM ${TABLE} ORDER BY ID;`);
-    console.log('\nExpected HEX_DATA:');
-    console.log(`  Row 1: ${expectedShort}`);
-    console.log(`  Row 2: ${expectedMid}`);
-    console.log(`\nTable ${TABLE} has been left in place for that verification.`);
-    console.log(`Re-run with --drop to remove it when finished.`);
-  } finally {
-    await job.close();
-  }
-}
 
-async function runDrop() {
-  const job = new SQLJob();
-  await job.connect(creds);
-  try {
-    const res = await tryExecute(job, `DROP TABLE ${TABLE}`);
-    if (res.success) {
-      console.log(`Dropped ${TABLE}`);
+    if (KEEP_TABLE) {
+      console.log('\nIndependent verification — run in ACS Run SQL Scripts:');
+      console.log(`  SELECT ID, LENGTH(DATA) AS LEN, HEX(DATA) AS HEX_DATA`);
+      console.log(`    FROM ${TABLE} ORDER BY ID;`);
+      console.log('\nExpected HEX_DATA:');
+      console.log(`  Row 1: ${expectedShort}`);
+      console.log(`  Row 2: ${expectedMid}`);
+      console.log(`\n--keep was set — ${TABLE} has been left in place for verification.`);
     } else {
-      console.log(`DROP TABLE returned: ${res.error || JSON.stringify(res)}`);
+      console.log('');
+      await dropTable(job);
     }
   } finally {
     await job.close();
   }
 }
 
-async function main() {
-  if (process.argv.includes('--drop')) {
-    await runDrop();
-  } else {
-    await runPoc();
-  }
-}
-
-main().catch(err => {
+runPoc().catch(err => {
   console.error(err);
   process.exit(1);
 });
