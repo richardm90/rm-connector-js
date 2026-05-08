@@ -212,8 +212,11 @@ export class IdbBackend implements BackendConnection {
       // bytes at every size tested (8 B upward), and additionally triggers
       // a deterministic SIGSEGV at ~1 MiB without the copy. See
       // examples/blob-sizing-idb.js for a standalone reproduction.
-      const safeParams = params.map(p => Buffer.isBuffer(p) ? Buffer.from(p) : p);
-      await stmt.bindParameters(safeParams);
+
+      // const safeParams = params.map(p => Buffer.isBuffer(p) ? Buffer.from(p) : p);
+      // await stmt.bindParameters(safeParams);
+      await stmt.bindParameters(params);
+
       // execute() returns output parameters as an array at runtime, but is typed as void
       const outputParms = (await stmt.execute() as any) || null;
       let data: any[];
