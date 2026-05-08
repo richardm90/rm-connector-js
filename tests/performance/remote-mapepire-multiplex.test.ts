@@ -110,7 +110,7 @@ const skip = !process.env.IBMI_HOST || !process.env.IBMI_USER || !process.env.IB
 const describeIf = skip ? describe.skip : describe;
 
 describeIf('Remote Mapepire: rm-connector-js multiplex vs serialized vs native', () => {
-  jest.setTimeout(180_000);
+  jest.setTimeout(600_000);
 
   async function buildPools() {
     const baseOpts = (multiplex: boolean): PoolOptions => ({

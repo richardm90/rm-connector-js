@@ -8,7 +8,7 @@ This document details the differences between the two backends based on testing 
 |---|---|---|
 | **Job subsystem** | `QSQSRVR` | `QZDASOINIT` |
 | **Connection protocol** | Native DB2 CLI (in-process, links against IBM i Db2 Call Level Interface) | WebSocket (remote) |
-| **Connection creation speed** | ~5-25ms per connection | ~100-250ms per connection |
+| **Connection creation speed** | ~4-15 ms warm; ~145-165 ms for the first connection in a session (`QSQSRVR` prestart activation) | ~25-35 ms on loopback; ~100-250 ms remote (TCP + TLS + WebSocket upgrade + JDBC init) |
 | **Connected log message** | `Connected (idb-pconnector)` | `Connected (mapepire-js)` |
 
 ## Result Envelope
@@ -112,20 +112,30 @@ and client combination:
 RM_RUN_SIZING=1 npm run test:parity -- --testNamePattern="BLOB-sizing"
 ```
 
-| Size    | idb insert / select | mapepire insert / select |
-|---------|---------------------|--------------------------|
-| 1 KiB   | 9 ms / 6 ms         | 8 ms / 18 ms             |
-| 64 KiB  | 7 ms / 2 ms         | 18 ms / 36 ms            |
-| 1 MiB   | 36 ms / 2 ms        | 387 ms / 574 ms          |
-| 8 MiB   | 378 ms / 28 ms      | 3.0 s / 3.7 s            |
-| 16 MiB  | 760 ms / 86 ms      | 4.4 s / 5.1 s            |
-| 24 MiB  | 1.1 s / 0.6 s       | 7.0 s / 13.2 s           |
-| 32 MiB  | 1.5 s / 1.0 s       | **FAIL** (WS cap)        |
-| 128 MiB | 11.7 s / 4.8 s      | —                        |
+| Size    | idb insert / select † | mapepire insert / select |
+|---------|-----------------------|--------------------------|
+| 1 KiB   | 9 ms / 6 ms           | 8 ms / 18 ms             |
+| 64 KiB  | 7 ms / 2 ms           | 18 ms / 36 ms            |
+| 1 MiB   | 36 ms / 2 ms          | 387 ms / 574 ms          |
+| 8 MiB   | 378 ms / 28 ms ⚠      | 3.0 s / 3.7 s            |
+| 16 MiB  | 760 ms / 86 ms ⚠      | 4.4 s / 5.1 s            |
+| 24 MiB  | 1.1 s / 0.6 s ⚠       | 7.0 s / 13.2 s           |
+| 32 MiB  | 1.5 s / 1.0 s ⚠       | **FAIL** (WS cap)        |
+| 128 MiB | 11.7 s / 4.8 s ⚠      | —                        |
 
-- **idb**: round-trips cleanly at every size tested, including 128 MiB. The
-  upper bound is driven by Node heap and `Buffer.constants.MAX_LENGTH` rather
-  than the driver.
+† The idb timings above are from a single clean run. Repeated runs on the same
+PASE host exhibited intermittent failures at every size marked ⚠ — silent byte
+corruption on readback at 16 MiB in one run, and native `SIGILL` / `SIGSEGV`
+crashes at 8 MiB on two further runs. Only the sub-8 MiB sizes round-tripped
+reliably across every run. Treat the reliable idb ceiling as roughly **1 MiB**
+on this host; the larger figures show what is *possible* on a good run, not
+what to expect every time.
+
+- **idb**: reliably round-trips up to at least 1 MiB. At ≥ 8 MiB the
+  round-trip is flaky — see [IBM/nodejs-idb-connector#202](https://github.com/IBM/nodejs-idb-connector/issues/202)
+  for the underlying native-memory bug and the details further down this
+  section. The hard upper bound (on a good run) is driven by Node heap and
+  `Buffer.constants.MAX_LENGTH` rather than the driver.
 - **mapepire**: round-trips cleanly up to 24 MiB. 32 MiB fails with WebSocket
   close code 1009 "Resulting message size [52436992] is too large for
   configured max of [52428800]" — the server-side 50 MiB message cap. Since
@@ -149,8 +159,7 @@ RM_RUN_SIZING=1 npm run test:parity -- --testNamePattern="BLOB-sizing"
     buffer (and on the server-side row), at a 16-byte window roughly 1 MiB
     before the end of the payload.
   The defensive copy fully neutralises the first two; the third is an
-  additional upstream symptom the copy doesn't cover. See
-  `examples/blob-sizing-idb.js` for a standalone reproduction.
+  additional upstream symptom the copy doesn't cover.
 - **mapepire backend**: every binary value goes through a lowercase hex-string
   intermediate in both directions. This introduces three limits:
   - **V8 `String::kMaxLength`** — roughly ~512 MB on 32-bit Node and ~1 GB on
