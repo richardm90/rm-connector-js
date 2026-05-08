@@ -1085,10 +1085,19 @@ describeIf('Backend Parity', () => {
       const mapepire = new RmConnection({ ...baseOpts().mapepire });
       await Promise.all([idb.init(true), mapepire.init(true)]);
       try {
-        await idb.execute(`CREATE OR REPLACE TABLE ${RT_TABLE} (ID INTEGER NOT NULL, DATA BLOB(1M))`);
+        await idb.execute(`CREATE OR REPLACE TABLE ${RT_TABLE} (ID INTEGER NOT NULL, DATA BLOB(2M))`);
 
+        // Small payload with varied bytes — exercises the byte-level correctness
+        // of the hex encode/decode path and the driver's small-value path.
         const idbPayload = Buffer.from([0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0xFF, 0x01, 0x80]);
         const mapepirePayload = Buffer.from('Round-trip via mapepire Buffer parameter', 'utf8');
+
+        // Larger payloads — exercise the path past idb-pconnector's ~64 KiB
+        // Buffer-mutation threshold and past mapepire's tens-of-KiB native
+        // path transition. Different fill bytes on each backend so a
+        // cross-read can't accidentally pass due to stale data.
+        const idbLargePayload = Buffer.alloc(1024 * 1024, 0xAB);
+        const mapepireLargePayload = Buffer.alloc(1024 * 1024, 0xCD);
 
         await idb.execute(`DELETE FROM ${RT_TABLE}`);
         await idb.execute(`INSERT INTO ${RT_TABLE} (ID, DATA) VALUES (?, ?)`, {
@@ -1097,10 +1106,18 @@ describeIf('Backend Parity', () => {
         await mapepire.execute(`INSERT INTO ${RT_TABLE} (ID, DATA) VALUES (?, ?)`, {
           parameters: [2, mapepirePayload],
         });
+        await idb.execute(`INSERT INTO ${RT_TABLE} (ID, DATA) VALUES (?, ?)`, {
+          parameters: [3, idbLargePayload],
+        });
+        await mapepire.execute(`INSERT INTO ${RT_TABLE} (ID, DATA) VALUES (?, ?)`, {
+          parameters: [4, mapepireLargePayload],
+        });
 
-        const [idbRead, mapRead] = await Promise.all([
+        const [idbRead, mapRead, idbLargeRead, mapLargeRead] = await Promise.all([
           idb.execute(`SELECT DATA FROM ${RT_TABLE} WHERE ID = ?`, { parameters: [1] }),
           mapepire.execute(`SELECT DATA FROM ${RT_TABLE} WHERE ID = ?`, { parameters: [2] }),
+          idb.execute(`SELECT DATA FROM ${RT_TABLE} WHERE ID = ?`, { parameters: [3] }),
+          mapepire.execute(`SELECT DATA FROM ${RT_TABLE} WHERE ID = ?`, { parameters: [4] }),
         ]);
 
         expect(Buffer.isBuffer(idbRead.data[0].DATA)).toBe(true);
@@ -1108,14 +1125,31 @@ describeIf('Backend Parity', () => {
         expect(idbRead.data[0].DATA.equals(idbPayload)).toBe(true);
         expect(mapRead.data[0].DATA.equals(mapepirePayload)).toBe(true);
 
+        // 1 MiB round-trips — proves the defensive Buffer copy in idb.ts and
+        // the hex-encoding path in mapepire.ts both preserve bytes at size.
+        expect(idbLargeRead.data[0].DATA.length).toBe(idbLargePayload.length);
+        expect(mapLargeRead.data[0].DATA.length).toBe(mapepireLargePayload.length);
+        expect(idbLargeRead.data[0].DATA.equals(idbLargePayload)).toBe(true);
+        expect(mapLargeRead.data[0].DATA.equals(mapepireLargePayload)).toBe(true);
+
+        // Also verify the caller's Buffer was not mutated by the driver. This
+        // catches any regression of the defensive copy in IdbBackend.
+        expect(idbLargePayload[0]).toBe(0xAB);
+        expect(idbLargePayload[idbLargePayload.length - 1]).toBe(0xAB);
+
         // Cross-read: each backend reads the other backend's row to prove the
         // bytes on disk are the same regardless of which backend wrote them.
-        const [idbCross, mapCross] = await Promise.all([
+        // Covers both the small and the 1 MiB pairs.
+        const [idbCross, mapCross, idbLargeCross, mapLargeCross] = await Promise.all([
           idb.execute(`SELECT DATA FROM ${RT_TABLE} WHERE ID = ?`, { parameters: [2] }),
           mapepire.execute(`SELECT DATA FROM ${RT_TABLE} WHERE ID = ?`, { parameters: [1] }),
+          idb.execute(`SELECT DATA FROM ${RT_TABLE} WHERE ID = ?`, { parameters: [4] }),
+          mapepire.execute(`SELECT DATA FROM ${RT_TABLE} WHERE ID = ?`, { parameters: [3] }),
         ]);
         expect(idbCross.data[0].DATA.equals(mapepirePayload)).toBe(true);
         expect(mapCross.data[0].DATA.equals(idbPayload)).toBe(true);
+        expect(idbLargeCross.data[0].DATA.equals(mapepireLargePayload)).toBe(true);
+        expect(mapLargeCross.data[0].DATA.equals(idbLargePayload)).toBe(true);
       } finally {
         try {
           await idb.execute(`DROP TABLE ${RT_TABLE}`);
@@ -1943,6 +1977,12 @@ describeIf('Backend Parity', () => {
     ];
 
     it('round-trips a range of BLOB sizes on both backends', async () => {
+      // Write directly to stdout/stderr to bypass Jest's console interception
+      // (which prefixes each line with "console.log" and a source location,
+      // making the diagnostic sweep hard to read).
+      const write = (s: string) => process.stdout.write(`${s}\n`);
+      const writeErr = (s: string) => process.stderr.write(`${s}\n`);
+
       // Shared connections for the whole suite — one connect + one close per
       // backend to minimise WebSocket lifecycle churn.
       const idb = new RmConnection({ backend: 'idb' });
@@ -1983,16 +2023,12 @@ describeIf('Backend Parity', () => {
           }
 
           const heapMiB = (process.memoryUsage().heapUsed / (1024 * 1024)).toFixed(1);
-          // eslint-disable-next-line no-console
-          console.log(
-            `  [${name}] ${label}: insert=${insertMs}ms select=${selectMs}ms heap=${heapMiB}MiB OK`,
-          );
+          write(`  [${name}] ${label}: insert=${insertMs}ms select=${selectMs}ms heap=${heapMiB}MiB OK`);
           results[name].largestSuccess = label;
           return true;
         } catch (e: any) {
           const msg = e?.message || String(e);
-          // eslint-disable-next-line no-console
-          console.error(`  [${name}] ${label}: LIMIT HIT — ${msg}`);
+          writeErr(`  [${name}] ${label}: LIMIT HIT — ${msg}`);
           results[name].stopReason = `${label}: ${msg}`;
           return false;
         }
@@ -2012,15 +2048,13 @@ describeIf('Backend Parity', () => {
         // stop the other from finishing. Within a backend, stop at the first
         // failure — larger sizes will fail the same way.
         for (const [label, size] of SIZES) {
-          // eslint-disable-next-line no-console
-          console.log(`\n--- ${label} (${size.toLocaleString()} bytes) [idb] ---`);
+          write(`\n--- ${label} (${size.toLocaleString()} bytes) [idb] ---`);
           const ok = await runSize('idb', idb, 1, label, size);
           if (!ok) break;
         }
 
         for (const [label, size] of SIZES) {
-          // eslint-disable-next-line no-console
-          console.log(`\n--- ${label} (${size.toLocaleString()} bytes) [mapepire] ---`);
+          write(`\n--- ${label} (${size.toLocaleString()} bytes) [mapepire] ---`);
           const ok = await runSize('mapepire', mapepire, 2, label, size);
           if (!ok) break;
         }
@@ -2034,12 +2068,10 @@ describeIf('Backend Parity', () => {
         await Promise.all([idb.close(), mapepire.close()]);
       }
 
-      // eslint-disable-next-line no-console
-      console.log('\n=== BLOB sizing summary ===');
+      write('\n=== BLOB sizing summary ===');
       for (const name of ['idb', 'mapepire']) {
         const r = results[name];
-        // eslint-disable-next-line no-console
-        console.log(
+        write(
           `  ${name}: largest success = ${r.largestSuccess ?? 'none'}` +
           (r.stopReason ? `, stopped at ${r.stopReason}` : ''),
         );
