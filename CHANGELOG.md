@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Performance benchmark suite restructured around five scenarios. Renamed `tests/performance/backend-performance.test.ts` → `tests/performance/rm-backend-performance.test.ts` and added additional env vars so a single test file covers every rm-connector-js scenario. Removed three redundant benchmark files — their data is now produced from the consolidated test plus the existing native baseline. Moved `bench-runs.sh` into `tests/performance/` and rewrote phases. Output filenames now include a `loopback` / `remote` location label. See `docs/PERFORMANCE-COMPARISON.md` for the new scenario layout.
+
 ### Added
 
 - Optional `creds` on the idb backend (new `IdbCredentials` interface: `{ user?, password?, database? }`) for profile swap on `*LOCAL` and remote RDB connections via directory entries (`WRKRDBDIRE`). Exported `isDaemonServer` type guard.

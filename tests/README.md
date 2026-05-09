@@ -45,11 +45,10 @@ Hermetic, fully mocked — run via `npm test` on any platform.
 
 Require a real IBM i. Run via `npm run test:performance`.
 
-- `backend-performance.test.ts` — idb vs mapepire benchmark matrix (connection creation, sequential/Promise.all, pool, parameterized queries, large result sets)
-- `native-mapepire-pool.test.ts` — idb-RmPool vs native `@ibm/mapepire-js` Pool
-- `remote-mapepire-pool.test.ts` — rm-connector-js serialized pool vs native mapepire pool from a remote workstation
-- `remote-mapepire-multiplex.test.ts` — three-way comparison: rm-connector-js serialized vs `multiplex: true` vs native mapepire pool
-- `pool-contention-proof.test.ts` — proves the health-check gate rate-limits concurrent `attach()` calls
+- `rm-backend-performance.test.ts` — idb vs mapepire benchmark matrix through the rm-connector-js wrapper (connection creation, sequential/Promise.all, pool, parameterized queries, large result sets). Honours `RM_ON_ATTACH`, `RM_MULTIPLEX`, `RM_KEEPALIVE`, `RM_POOL_SIZE` env vars to switch between scenarios — see `docs/PERFORMANCE-COMPARISON.md` Section 3f.
+- `native-backend-performance.test.ts` — same matrix run against the native drivers directly (no rm-connector-js on the data path), for the wrapper-overhead baseline.
+- `pool-contention-proof.test.ts` — proves the health-check gate rate-limits concurrent `attach()` calls.
+- `bench-runs.sh` — orchestrates 3 runs × 3 query counts (50/200/1000) per phase across the five scenarios, output to `$HOME/bench-results/`.
 
 ### Backend parity (`tests/parity/`)
 

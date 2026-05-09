@@ -15,7 +15,7 @@
  *
  * Run with:
  *   IBMI_HOST=... IBMI_USER=... IBMI_PASSWORD=... \
- *     npm run test:performance -- --testPathPattern=native-backend-performance
+ *     npm run test:performance -- --testPathPatterns=native-backend-performance
  */
 
 import { performance } from 'perf_hooks';

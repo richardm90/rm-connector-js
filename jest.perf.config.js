@@ -15,7 +15,7 @@ module.exports = {
   preset: 'ts-jest',
   testEnvironment: 'node',
   roots: ['<rootDir>/tests/performance'],
-  testMatch: ['**/backend-performance.test.ts', '**/native-backend-performance.test.ts', '**/pool-contention-proof.test.ts', '**/native-mapepire-pool.test.ts', '**/remote-mapepire-pool.test.ts', '**/remote-mapepire-multiplex.test.ts'],
+  testMatch: ['**/rm-backend-performance.test.ts', '**/native-backend-performance.test.ts', '**/pool-contention-proof.test.ts'],
   moduleFileExtensions: ['ts', 'js', 'json'],
   verbose: true,
 };

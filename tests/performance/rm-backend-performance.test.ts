@@ -1,19 +1,25 @@
 /**
- * Backend Performance Tests
+ * rm-connector-js Backend Performance Tests
  *
- * These tests compare the performance of the mapepire and idb backends
- * running on the same IBM i system. They are designed to complement
- * Liam's benchmarks (which tested remote ODBC vs Mapepire from a Mac)
- * by measuring both backends locally on IBM i.
+ * Measures the performance of the mapepire and idb backends when accessed
+ * through the rm-connector-js wrapper (RmConnection / RmPool). The native
+ * baseline (drivers used directly, no rm-connector-js on the data path)
+ * lives in `native-backend-performance.test.ts`.
  *
- * These tests are NOT part of the regular `npm test` suite. They require:
- *   - Running on IBM i (for idb-pconnector access)
- *   - Network access to the same IBM i with mapepire
- *   - Environment variables: IBMI_HOST, IBMI_USER, IBMI_PASSWORD
- *   - A running mapepire server on the target IBM i
- *   - The SAMPLE schema (created via: CALL QSYS.CREATE_SQL_SAMPLE('SAMPLE'))
+ * Env vars that select which scenario this run measures (see
+ * `docs/PERFORMANCE-COMPARISON.md` Section 3f):
+ *   - IBMI_HOST / IBMI_USER / IBMI_PASSWORD — connection details (required).
+ *   - QUERY_COUNT (default 50) — queries per scenario.
+ *   - SAMPLE_SCHEMA (default SAMPLE) — schema name.
+ *   - RM_ON_ATTACH (default true) — health check on each attach() call.
+ *   - RM_MULTIPLEX (default false) — opt in to mapepire multiplex mode;
+ *     when true the idb branch of every test is skipped (idb cannot multiplex).
+ *   - RM_KEEPALIVE (default unset/disabled) — keepalive interval in minutes;
+ *     fractional values allowed; only meaningful for mapepire.
+ *   - RM_POOL_SIZE (default 5) — pool maxSize / initialConnections.size.
  *
- * Run with: npm run test:performance
+ * Run via `bench-runs.sh` for the standard 3-runs × 3-query-counts harness,
+ * or directly with `npm run test:performance -- --testPathPatterns=rm-backend-performance`.
  */
 
 import { performance } from 'perf_hooks';
@@ -38,8 +44,23 @@ const QUERY_COUNT = Number(process.env.QUERY_COUNT) || 50;
 /** Number of warm-up queries before measurement */
 const WARMUP_COUNT = 3;
 
-/** Pool size (matches Liam's benchmark) */
-const POOL_SIZE = 5;
+/** Pool size (configurable via RM_POOL_SIZE env var; default 5) */
+const POOL_SIZE = Number(process.env.RM_POOL_SIZE) || 5;
+
+/** Per-attach health check (configurable via RM_ON_ATTACH env var; default true) */
+const RM_ON_ATTACH = process.env.RM_ON_ATTACH !== 'false';
+
+/** Multiplex mode (mapepire only, idb is skipped when true) */
+const RM_MULTIPLEX = process.env.RM_MULTIPLEX === 'true';
+
+/** Keepalive interval in minutes; null = disabled */
+const RM_KEEPALIVE: number | null =
+  process.env.RM_KEEPALIVE !== undefined && process.env.RM_KEEPALIVE !== ''
+    ? Number(process.env.RM_KEEPALIVE)
+    : null;
+
+/** When true, the idb branch of every test runs alongside mapepire */
+const RUN_IDB = !RM_MULTIPLEX;
 
 /** SAMPLE schema name (configurable via SAMPLE_SCHEMA env var) */
 const SAMPLE_SCHEMA = process.env.SAMPLE_SCHEMA || 'SAMPLE';
@@ -73,28 +94,43 @@ interface Stats {
 // Helpers
 // ---------------------------------------------------------------------------
 
-function baseOpts(): { idb: RmConnectionOptions; mapepire: RmConnectionOptions } {
+function baseOpts(): { idb: RmConnectionOptions | null; mapepire: RmConnectionOptions } {
+  const mapepire: RmConnectionOptions = {
+    backend: 'mapepire',
+    creds: MAPEPIRE_CREDS,
+    logLevel: 'none',
+    multiplex: RM_MULTIPLEX,
+  };
+  if (RM_KEEPALIVE !== null) {
+    mapepire.keepalive = RM_KEEPALIVE;
+  }
   return {
-    idb: { backend: 'idb', logLevel: 'none' },
-    mapepire: { backend: 'mapepire', creds: MAPEPIRE_CREDS, logLevel: 'none' },
+    idb: RUN_IDB ? { backend: 'idb', logLevel: 'none' } : null,
+    mapepire,
   };
 }
 
-function poolOpts(): { idb: PoolOptions; mapepire: PoolOptions } {
+function poolOpts(): { idb: PoolOptions | null; mapepire: PoolOptions } {
+  const mapepire: PoolOptions = {
+    backend: 'mapepire',
+    creds: MAPEPIRE_CREDS,
+    logLevel: 'none',
+    maxSize: POOL_SIZE,
+    initialConnections: { size: POOL_SIZE },
+    multiplex: RM_MULTIPLEX,
+    healthCheck: { onAttach: RM_ON_ATTACH, keepalive: RM_KEEPALIVE },
+  };
   return {
-    idb: {
-      backend: 'idb',
-      logLevel: 'none',
-      maxSize: POOL_SIZE,
-      initialConnections: { size: POOL_SIZE },
-    },
-    mapepire: {
-      backend: 'mapepire',
-      creds: MAPEPIRE_CREDS,
-      logLevel: 'none',
-      maxSize: POOL_SIZE,
-      initialConnections: { size: POOL_SIZE },
-    },
+    idb: RUN_IDB
+      ? {
+          backend: 'idb',
+          logLevel: 'none',
+          maxSize: POOL_SIZE,
+          initialConnections: { size: POOL_SIZE },
+          healthCheck: { onAttach: RM_ON_ATTACH, keepalive: RM_KEEPALIVE },
+        }
+      : null,
+    mapepire,
   };
 }
 
@@ -127,33 +163,54 @@ const println = (s: string = ''): void => {
   process.stdout.write(s + '\n');
 };
 
-function printComparison(label: string, idbStats: Stats, mapepireStats: Stats): void {
+function printResults(label: string, idbStats: Stats | null, mapepireStats: Stats): void {
   println('');
-  println(`  ┌─────────────────────────────────────────────────────────────────┐`);
-  println(`  │ ${label.padEnd(63)} │`);
-  println(`  ├──────────────────┬──────────────────┬──────────────────┬────────┤`);
-  println(`  │ Metric           │ idb              │ mapepire         │ Ratio  │`);
-  println(`  ├──────────────────┼──────────────────┼──────────────────┼────────┤`);
-
-  const rows: [string, number, number][] = [
-    ['Min', idbStats.min, mapepireStats.min],
-    ['Max', idbStats.max, mapepireStats.max],
-    ['Avg', idbStats.avg, mapepireStats.avg],
-    ['Median', idbStats.median, mapepireStats.median],
-    ['Total (sum)', idbStats.total, mapepireStats.total],
-    ['Wall clock', idbStats.wallClock, mapepireStats.wallClock],
-  ];
-
-  for (const [metric, idb, map] of rows) {
-    const r = map / idb;
-    const ratioStr = r > 1 ? `${r.toFixed(1)}x` : `${(1 / r).toFixed(1)}x`;
-    println(
-      `  │ ${metric.padEnd(16)} │ ${formatMs(idb).padStart(16)} │ ${formatMs(map).padStart(16)} │ ${ratioStr.padStart(6)} │`,
-    );
+  if (idbStats) {
+    println(`  ┌─────────────────────────────────────────────────────────────────┐`);
+    println(`  │ ${label.padEnd(63)} │`);
+    println(`  ├──────────────────┬──────────────────┬──────────────────┬────────┤`);
+    println(`  │ Metric           │ idb              │ mapepire         │ Ratio  │`);
+    println(`  ├──────────────────┼──────────────────┼──────────────────┼────────┤`);
+    const rows: [string, number, number][] = [
+      ['Min', idbStats.min, mapepireStats.min],
+      ['Max', idbStats.max, mapepireStats.max],
+      ['Avg', idbStats.avg, mapepireStats.avg],
+      ['Median', idbStats.median, mapepireStats.median],
+      ['Total (sum)', idbStats.total, mapepireStats.total],
+      ['Wall clock', idbStats.wallClock, mapepireStats.wallClock],
+    ];
+    for (const [metric, idb, map] of rows) {
+      const r = map / idb;
+      const ratioStr = r > 1 ? `${r.toFixed(1)}x` : `${(1 / r).toFixed(1)}x`;
+      println(
+        `  │ ${metric.padEnd(16)} │ ${formatMs(idb).padStart(16)} │ ${formatMs(map).padStart(16)} │ ${ratioStr.padStart(6)} │`,
+      );
+    }
+    println(`  └──────────────────┴──────────────────┴──────────────────┴────────┘`);
+  } else {
+    println(`  ┌─────────────────────────────────────────────────────┐`);
+    println(`  │ ${label.padEnd(51)} │`);
+    println(`  ├──────────────────┬──────────────────────────────────┤`);
+    println(`  │ Metric           │ mapepire                         │`);
+    println(`  ├──────────────────┼──────────────────────────────────┤`);
+    const rows: [string, number][] = [
+      ['Min', mapepireStats.min],
+      ['Max', mapepireStats.max],
+      ['Avg', mapepireStats.avg],
+      ['Median', mapepireStats.median],
+      ['Total (sum)', mapepireStats.total],
+      ['Wall clock', mapepireStats.wallClock],
+    ];
+    for (const [metric, map] of rows) {
+      println(`  │ ${metric.padEnd(16)} │ ${formatMs(map).padStart(32)} │`);
+    }
+    println(`  └──────────────────┴──────────────────────────────────┘`);
   }
-
-  println(`  └──────────────────┴──────────────────┴──────────────────┴────────┘`);
-  println(`  Queries: ${idbStats.count}, Warm-up: ${WARMUP_COUNT}`);
+  println(
+    `  Queries: ${mapepireStats.count}, Warm-up: ${WARMUP_COUNT}, ` +
+      `pool=${POOL_SIZE}, multiplex=${RM_MULTIPLEX}, ` +
+      `onAttach=${RM_ON_ATTACH}, keepalive=${RM_KEEPALIVE === null ? 'off' : `${RM_KEEPALIVE}min`}`,
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -256,7 +313,7 @@ const describeIf = skip ? describe.skip : describe;
 // Tests
 // ---------------------------------------------------------------------------
 
-describeIf('Backend Performance', () => {
+describeIf('rm-connector-js Backend Performance', () => {
   jest.setTimeout(120_000);
 
   // -------------------------------------------------------------------
@@ -270,11 +327,13 @@ describeIf('Backend Performance', () => {
       const opts = baseOpts();
 
       for (let i = 0; i < iterations; i++) {
-        const idbConn = new RmConnection(opts.idb);
-        const start = performance.now();
-        await idbConn.init(true);
-        idbTimes.push(performance.now() - start);
-        await idbConn.close();
+        if (opts.idb) {
+          const idbConn = new RmConnection(opts.idb);
+          const start = performance.now();
+          await idbConn.init(true);
+          idbTimes.push(performance.now() - start);
+          await idbConn.close();
+        }
 
         const mapConn = new RmConnection(opts.mapepire);
         const mStart = performance.now();
@@ -283,14 +342,16 @@ describeIf('Backend Performance', () => {
         await mapConn.close();
       }
 
-      const idbStats = calcStats({ times: idbTimes, wallClock: idbTimes.reduce((a, b) => a + b, 0) });
+      const idbStats = opts.idb
+        ? calcStats({ times: idbTimes, wallClock: idbTimes.reduce((a, b) => a + b, 0) })
+        : null;
       const mapStats = calcStats({ times: mapepireTimes, wallClock: mapepireTimes.reduce((a, b) => a + b, 0) });
 
-      printComparison(`Connection Creation (${iterations} iterations)`, idbStats, mapStats);
+      printResults(`Connection Creation (${iterations} iterations)`, idbStats, mapStats);
 
-      // Sanity check: both backends should have connected
-      expect(idbTimes.length).toBe(iterations);
+      // Sanity check: mapepire should always have connected; idb only when enabled
       expect(mapepireTimes.length).toBe(iterations);
+      if (opts.idb) expect(idbTimes.length).toBe(iterations);
     });
   });
 
@@ -300,41 +361,41 @@ describeIf('Backend Performance', () => {
   describe('Single connection — sequential', () => {
     it('standard query', async () => {
       const opts = baseOpts();
-      const idbConn = new RmConnection(opts.idb);
+      const idbConn = opts.idb ? new RmConnection(opts.idb) : null;
       const mapConn = new RmConnection(opts.mapepire);
-      await Promise.all([idbConn.init(true), mapConn.init(true)]);
+      await Promise.all([idbConn ? idbConn.init(true) : Promise.resolve(), mapConn.init(true)]);
 
       try {
-        const idbTiming = await timeSequential(idbConn, SQL_STANDARD, QUERY_COUNT);
+        const idbTiming = idbConn ? await timeSequential(idbConn, SQL_STANDARD, QUERY_COUNT) : null;
         const mapTiming = await timeSequential(mapConn, SQL_STANDARD, QUERY_COUNT);
 
-        printComparison(
+        printResults(
           `Single Connection — Sequential (${SQL_STANDARD})`,
-          calcStats(idbTiming),
+          idbTiming ? calcStats(idbTiming) : null,
           calcStats(mapTiming),
         );
       } finally {
-        await Promise.all([idbConn.close(), mapConn.close()]);
+        await Promise.all([idbConn ? idbConn.close() : Promise.resolve(), mapConn.close()]);
       }
     });
 
     it('large result set', async () => {
       const opts = baseOpts();
-      const idbConn = new RmConnection(opts.idb);
+      const idbConn = opts.idb ? new RmConnection(opts.idb) : null;
       const mapConn = new RmConnection(opts.mapepire);
-      await Promise.all([idbConn.init(true), mapConn.init(true)]);
+      await Promise.all([idbConn ? idbConn.init(true) : Promise.resolve(), mapConn.init(true)]);
 
       try {
-        const idbTiming = await timeSequential(idbConn, SQL_LARGE, QUERY_COUNT);
+        const idbTiming = idbConn ? await timeSequential(idbConn, SQL_LARGE, QUERY_COUNT) : null;
         const mapTiming = await timeSequential(mapConn, SQL_LARGE, QUERY_COUNT);
 
-        printComparison(
+        printResults(
           `Single Connection — Sequential — Large Result Set`,
-          calcStats(idbTiming),
+          idbTiming ? calcStats(idbTiming) : null,
           calcStats(mapTiming),
         );
       } finally {
-        await Promise.all([idbConn.close(), mapConn.close()]);
+        await Promise.all([idbConn ? idbConn.close() : Promise.resolve(), mapConn.close()]);
       }
     });
   });
@@ -345,21 +406,21 @@ describeIf('Backend Performance', () => {
   describe('Single connection — Promise.all', () => {
     it('standard query', async () => {
       const opts = baseOpts();
-      const idbConn = new RmConnection(opts.idb);
+      const idbConn = opts.idb ? new RmConnection(opts.idb) : null;
       const mapConn = new RmConnection(opts.mapepire);
-      await Promise.all([idbConn.init(true), mapConn.init(true)]);
+      await Promise.all([idbConn ? idbConn.init(true) : Promise.resolve(), mapConn.init(true)]);
 
       try {
-        const idbTiming = await timeConcurrentSingle(idbConn, SQL_STANDARD, QUERY_COUNT);
+        const idbTiming = idbConn ? await timeConcurrentSingle(idbConn, SQL_STANDARD, QUERY_COUNT) : null;
         const mapTiming = await timeConcurrentSingle(mapConn, SQL_STANDARD, QUERY_COUNT);
 
-        printComparison(
+        printResults(
           `Single Connection — Promise.all (${SQL_STANDARD})`,
-          calcStats(idbTiming),
+          idbTiming ? calcStats(idbTiming) : null,
           calcStats(mapTiming),
         );
       } finally {
-        await Promise.all([idbConn.close(), mapConn.close()]);
+        await Promise.all([idbConn ? idbConn.close() : Promise.resolve(), mapConn.close()]);
       }
     });
   });
@@ -370,21 +431,23 @@ describeIf('Backend Performance', () => {
   describe('Pool — sequential', () => {
     it('standard query', async () => {
       const opts = poolOpts();
-      const idbPool = new RmPool({ id: 'idb-perf', config: { id: 'idb-perf', PoolOptions: opts.idb } }, 'none');
+      const idbPool = opts.idb
+        ? new RmPool({ id: 'idb-perf', config: { id: 'idb-perf', PoolOptions: opts.idb } }, 'none')
+        : null;
       const mapPool = new RmPool({ id: 'map-perf', config: { id: 'map-perf', PoolOptions: opts.mapepire } }, 'none');
-      await Promise.all([idbPool.init(), mapPool.init()]);
+      await Promise.all([idbPool ? idbPool.init() : Promise.resolve(), mapPool.init()]);
 
       try {
-        const idbTiming = await timePoolSequential(idbPool, SQL_STANDARD, QUERY_COUNT);
+        const idbTiming = idbPool ? await timePoolSequential(idbPool, SQL_STANDARD, QUERY_COUNT) : null;
         const mapTiming = await timePoolSequential(mapPool, SQL_STANDARD, QUERY_COUNT);
 
-        printComparison(
+        printResults(
           `Pool (${POOL_SIZE}) — Sequential (${SQL_STANDARD})`,
-          calcStats(idbTiming),
+          idbTiming ? calcStats(idbTiming) : null,
           calcStats(mapTiming),
         );
       } finally {
-        await Promise.all([idbPool.close(), mapPool.close()]);
+        await Promise.all([idbPool ? idbPool.close() : Promise.resolve(), mapPool.close()]);
       }
     });
   });
@@ -395,21 +458,23 @@ describeIf('Backend Performance', () => {
   describe('Pool — Promise.all', () => {
     it('standard query', async () => {
       const opts = poolOpts();
-      const idbPool = new RmPool({ id: 'idb-perf', config: { id: 'idb-perf', PoolOptions: opts.idb } }, 'none');
+      const idbPool = opts.idb
+        ? new RmPool({ id: 'idb-perf', config: { id: 'idb-perf', PoolOptions: opts.idb } }, 'none')
+        : null;
       const mapPool = new RmPool({ id: 'map-perf', config: { id: 'map-perf', PoolOptions: opts.mapepire } }, 'none');
-      await Promise.all([idbPool.init(), mapPool.init()]);
+      await Promise.all([idbPool ? idbPool.init() : Promise.resolve(), mapPool.init()]);
 
       try {
-        const idbTiming = await timePoolConcurrent(idbPool, SQL_STANDARD, QUERY_COUNT);
+        const idbTiming = idbPool ? await timePoolConcurrent(idbPool, SQL_STANDARD, QUERY_COUNT) : null;
         const mapTiming = await timePoolConcurrent(mapPool, SQL_STANDARD, QUERY_COUNT);
 
-        printComparison(
+        printResults(
           `Pool (${POOL_SIZE}) — Promise.all (${SQL_STANDARD})`,
-          calcStats(idbTiming),
+          idbTiming ? calcStats(idbTiming) : null,
           calcStats(mapTiming),
         );
       } finally {
-        await Promise.all([idbPool.close(), mapPool.close()]);
+        await Promise.all([idbPool ? idbPool.close() : Promise.resolve(), mapPool.close()]);
       }
     });
   });
@@ -420,9 +485,9 @@ describeIf('Backend Performance', () => {
   describe('Parameterized queries — sequential', () => {
     it('measures parameterized query performance', async () => {
       const opts = baseOpts();
-      const idbConn = new RmConnection(opts.idb);
+      const idbConn = opts.idb ? new RmConnection(opts.idb) : null;
       const mapConn = new RmConnection(opts.mapepire);
-      await Promise.all([idbConn.init(true), mapConn.init(true)]);
+      await Promise.all([idbConn ? idbConn.init(true) : Promise.resolve(), mapConn.init(true)]);
 
       const sql = 'SELECT * FROM QIWS.QCUSTCDT WHERE STATE = ?';
       const queryOpts = { parameters: ['TX'] };
@@ -433,17 +498,20 @@ describeIf('Backend Performance', () => {
 
         // Warm-up
         for (let i = 0; i < WARMUP_COUNT; i++) {
-          await idbConn.execute(sql, queryOpts);
+          if (idbConn) await idbConn.execute(sql, queryOpts);
           await mapConn.execute(sql, queryOpts);
         }
 
-        const idbWallStart = performance.now();
-        for (let i = 0; i < QUERY_COUNT; i++) {
-          const start = performance.now();
-          await idbConn.execute(sql, queryOpts);
-          idbTimes.push(performance.now() - start);
+        let idbWallClock = 0;
+        if (idbConn) {
+          const idbWallStart = performance.now();
+          for (let i = 0; i < QUERY_COUNT; i++) {
+            const start = performance.now();
+            await idbConn.execute(sql, queryOpts);
+            idbTimes.push(performance.now() - start);
+          }
+          idbWallClock = performance.now() - idbWallStart;
         }
-        const idbWallClock = performance.now() - idbWallStart;
 
         const mapWallStart = performance.now();
         for (let i = 0; i < QUERY_COUNT; i++) {
@@ -453,13 +521,13 @@ describeIf('Backend Performance', () => {
         }
         const mapWallClock = performance.now() - mapWallStart;
 
-        printComparison(
+        printResults(
           `Parameterized Query — Sequential`,
-          calcStats({ times: idbTimes, wallClock: idbWallClock }),
+          idbConn ? calcStats({ times: idbTimes, wallClock: idbWallClock }) : null,
           calcStats({ times: mapTimes, wallClock: mapWallClock }),
         );
       } finally {
-        await Promise.all([idbConn.close(), mapConn.close()]);
+        await Promise.all([idbConn ? idbConn.close() : Promise.resolve(), mapConn.close()]);
       }
     });
   });
