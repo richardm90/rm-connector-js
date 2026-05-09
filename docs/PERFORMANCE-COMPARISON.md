@@ -8,7 +8,7 @@ One of the primary motivations behind rm-connector-js is enabling a dual-environ
 
 ### idb-pconnector
 
-`idb-pconnector` is a Promise-based wrapper around `idb-connector`, the native C++ Node.js addon (N-API) that actually calls the DB2 SQL CLI API directly on IBM i. `idb-connector` is the piece doing the real work — the N-API bridge, the C buffers, the CLI calls into the QSQSRVR job. `idb-pconnector` re-exports its classes and methods, adding `Promise` semantics on top of the original callback-based API so modern `async`/`await` code can use it directly. rm-connector-js imports `idb-pconnector`, so everywhere this document says "idb-pconnector" the behaviour, performance characteristics, and data path are really those of the underlying `idb-connector` addon.
+`idb-pconnector` is a promise-based wrapper around `idb-connector`, the native C++ Node.js addon (N-API) that actually calls the DB2 SQL CLI API directly on IBM i. `idb-connector` is the piece doing the real work — the N-API bridge, the C buffers, the CLI calls into the QSQSRVR job. `idb-pconnector` re-exports its classes and methods, adding `Promise` semantics on top of the original callback-based API so modern `async`/`await` code can use it directly. rm-connector-js imports `idb-pconnector`, so everywhere this document says "idb-pconnector" the behaviour, performance characteristics, and data path are really those of the underlying `idb-connector` addon.
 
 The data path is:
 
@@ -111,7 +111,9 @@ Benchmark results (see below) show where each mode wins:
 
 ## Benchmark Results
 
-The following benchmarks were run on IBM i with both backends operating on the same machine. They fill a gap in the public record — prior benchmarks (such as Liam's [blog #69](https://github.com/worksofliam/blog/issues/69)) tested remote ODBC vs Mapepire from a Mac, not both connectors running locally on IBM i.
+The following benchmarks were run on IBM i using `rm-connector-js` and with both backends operating on the same machine.
+
+They fill a gap in the public record — prior benchmarks (such as Liam's [blog #69](https://github.com/worksofliam/blog/issues/69)) tested remote ODBC vs Mapepire from a Mac, not both connectors running locally on IBM i.
 
 **Both backends are accessed through rm-connector-js (`RmConnection` for single-connection scenarios, `RmPool` for pool scenarios) — this is an apples-to-apples comparison through the same wrapper, isolating the underlying driver as the only variable.** For a baseline using the native drivers directly (without rm-connector-js), see [Native Driver Baseline](#native-driver-baseline-power10-powervs-ibm-i-75) below. For the existing cross-comparison against the native `@ibm/mapepire-js` `Pool` (with built-in multiplexing) on the same hardware as the rm-connector-js measurements, see [Native Mapepire Pool vs idb](#native-mapepire-pool-vs-idb-multiplexing-test).
 
@@ -131,15 +133,17 @@ The following benchmarks were run on IBM i with both backends operating on the s
 
 ### What each scenario measures
 
-The seven rows in the [Results](#results) table come from distinct test scenarios in [`tests/performance/backend-performance.test.ts`](../tests/performance/backend-performance.test.ts). Knowing what each one actually does makes the numbers easier to interpret.
+The details in the [Results](#results) tables come from distinct test scenarios in [`tests/performance/backend-performance.test.ts`](../tests/performance/backend-performance.test.ts).
 
-- **Connection creation** — Constructs a fresh `RmConnection`, calls `init()` (which is what gets timed), then closes. Repeats 10 times in a loop. The cell value is the median per-iteration init time. For idb the *first* iteration in any session pays a `QSQSRVR` prestart-job cold start (~145–165 ms — visible in the max but not the median); subsequent iterations drop to single-digit ms. ([`backend-performance.test.ts:265`](../tests/performance/backend-performance.test.ts#L265))
-- **Single sequential** — Opens one `RmConnection`, then runs N queries serially with `await conn.execute(SQL_STANDARD)` in a `for` loop. Each query is timed individually; the cell is the median single-query execution time on a warm connection. Closest representation of "the cost of one query in a long-running script". ([`:300`](../tests/performance/backend-performance.test.ts#L300))
-- **Single sequential (large)** — Same shape as Single sequential but with the larger SQL (`SELECT * FROM SAMPLE.EMPLOYEE CROSS JOIN ... × 10`, ~420 rows). Shows how per-query cost shifts when DB execution and result-set transfer dominate over protocol overhead. ([`:321`](../tests/performance/backend-performance.test.ts#L321))
-- **Single Promise.all** — Opens one `RmConnection`, fires N queries concurrently via `Promise.all(... conn.execute(...))`. Tests what happens when many in-flight queries share a single connection. The mapepire side correlates them on its `SQLJob`; the idb side serializes them through the CLI handle. ⚠️ **The per-query median for this row is misleading** — it includes time each query spent queued behind earlier ones on the same connection. Use the [Wall Clock Times](#wall-clock-times-promiseall-scenarios) table below for throughput. ([`:345`](../tests/performance/backend-performance.test.ts#L345))
-- **Pool sequential** — Creates an `RmPool` of 5 connections, then runs N queries serially via `pool.query()` (each call grabs a connection, runs the query, releases it). Closest match to a typical production workload — every query incurs an attach + per-attach health check + detach on top of the SQL work. ([`:370`](../tests/performance/backend-performance.test.ts#L370))
-- **Pool Promise.all** — Same `RmPool`, but fires N queries concurrently via `Promise.all`. With 5 connections and N concurrent calls, queries 6+ have to wait for connections to free up. RmPool has no explicit FIFO queue; it relies on the per-attach `VALUES 1` health check to slow each attach call enough for earlier queries to release their connections — this timing dependency is proven by the `pool-contention-proof` test suite. ⚠️ **Per-query median for this row is also misleading** for the same reason as Single Promise.all — use Wall Clock for throughput. ([`:395`](../tests/performance/backend-performance.test.ts#L395))
-- **Parameterized sequential** — Opens one `RmConnection`, runs N parameterised queries serially (`SELECT * FROM QIWS.QCUSTCDT WHERE STATE = ?` with `['TX']`). Same shape as Single sequential but with a bound parameter; confirms whether the per-query overhead is sensitive to query shape (it isn't — protocol overhead dominates either way). ([`:420`](../tests/performance/backend-performance.test.ts#L420))
+Knowing what each one actually does makes the numbers easier to interpret.
+
+- **Connection creation** — Constructs a fresh `New Connection` > `Initialize Connection` (which is what gets timed) > `Close Connection`. Repeats 10 times in a loop. The cell value is the median per-iteration `Initialize Connection` time. For idb the *first* iteration in any session pays a cold start penalty (~145–165 ms — visible in the max but not the median); subsequent iterations drop to single-digit ms.
+- **Single sequential** — Opens one connection, then runs N queries serially in a `for` loop, awaiting each query response. Each query is timed individually; the cell is the median single-query execution time on a warm connection. Closest representation of "the cost of one query in a long-running script".
+- **Single sequential (large)** — Same shape as Single sequential but with the larger SQL result set(~420 rows). Shows how per-query cost shifts when DB execution and result-set transfer dominate over protocol overhead.
+- **Single Promise.all** — Opens one connection, fires N queries concurrently. Tests what happens when many in-flight queries share a single connection. The mapepire side correlates them on its `SQLJob`; the idb side serializes them through the CLI handle. ⚠️ **The per-query median for this row is misleading** — it includes time each query spent queued behind earlier ones on the same connection. Use the [Wall Clock Times](#wall-clock-times-promiseall-scenarios) table below for throughput.
+- **Pool sequential** — Creates a pool of 5 connections, then runs N queries serially (each call grabs a connection, runs the query, releases it). Closest match to a typical production workload — every query incurs an attach + per-attach health check + detach on top of the SQL work.
+- **Pool Promise.all** — Same pool, but fires N queries concurrently. With 5 connections and N concurrent calls, queries 6+ have to wait for connections to free up. `RmPool` has no explicit FIFO queue; it relies on the per-attach health check to slow each attach call enough for earlier queries to release their connections — this timing dependency is proven by the `pool-contention-proof` test suite. ⚠️ **Per-query median for this row is also misleading** for the same reason as Single Promise.all — use Wall Clock for throughput.
+- **Parameterized sequential** — Opens one connection, runs N parameterised queries serially. Same shape as Single sequential but with a bound parameter; confirms whether the per-query overhead is sensitive to query shape (it isn't — protocol overhead dominates either way).
 
 #### What the figures mean
 
@@ -152,11 +156,22 @@ Each cell in the [Wall Clock Times](#wall-clock-times-promiseall-scenarios) tabl
 
 ### Results
 
+#### Connection creation
+
+The median is consistent across the 3 sessions regardless of QUERY_COUNT, so a single per-backend figure tells the whole story:
+
+| Backend | Median per iteration (warm) |
+|---|---|
+| idb-pconnector | 9.58 ms |
+| Mapepire | 26.74 ms |
+| | **idb ~2.8× faster** |
+
+#### Per-query scenarios
+
 All values are median query times in milliseconds, median across 3 independent runs per query count.
 
 | Scenario | 50q idb | 50q mapepire | 200q idb | 200q mapepire | 1000q idb | 1000q mapepire | Stable Ratio |
 |---|---|---|---|---|---|---|---|
-| Connection creation | 9.58ms | 27.90ms | 9.27ms | 26.74ms | 9.81ms | 25.65ms | **idb ~2.7x faster** |
 | Single sequential | 0.66ms | 1.50ms | 0.64ms | 1.29ms | 0.59ms | 1.15ms | **idb ~2x faster** |
 | Single sequential (large) | 20.15ms | 7.61ms | 20.48ms | 6.90ms | 20.50ms | 7.09ms | **mapepire ~3x faster** (cache-warmed — see analysis) |
 | Single Promise.all | 23.51ms | 30.06ms | 62.48ms | 85.91ms | 330.48ms | 481.47ms | **idb ~1.5x faster** |
@@ -176,6 +191,21 @@ The wall clock measures how long it takes to process the entire batch of queries
 The pool Promise.all wall clock is the best throughput metric: it shows how quickly each backend can push N queries through 5 connections under maximum contention. At 1000 queries, idb completes the batch in under half a second while mapepire takes nearly 1.4 seconds.
 
 The single Promise.all wall clock at 1000 queries is a finding worth flagging at this scale: a single mapepire `SQLJob` correlates concurrent in-flight queries via its native ID-tagged WebSocket protocol, whereas a single idb `Connection` can only execute one query at a time, so 1000 concurrent calls serialize through the CLI handle. At low concurrency idb still wins on raw per-query speed, but as concurrency grows mapepire's multiplexing closes the gap and at 1000q ends up slightly ahead.
+
+#### Why mapepire's single connection beats its 5-connection pool
+
+Looking down the mapepire columns of the wall-clock table, the single-connection results are consistently faster than the pooled results — 57 ms vs 99 ms at 50q, 137 ms vs 296 ms at 200q, 666 ms vs 1389 ms at 1000q. A pool of 5 ought to outperform a single connection, so what's going on?
+
+Two compounding effects:
+
+1. **The Single path uses native `SQLJob` multiplexing for free.** A single `RmConnection` wraps one `SQLJob`, and mapepire's WebSocket protocol natively correlates concurrent in-flight queries via ID. Firing 1000 `Promise.all` calls on one `RmConnection` puts 1000 queries on the wire concurrently and the server drains them as fast as it can — no per-query setup, no attach/detach.
+2. **The Pool path runs in `RmPool`'s default serialized mode**, which is the lowest-common-denominator behaviour shared with idb (idb can't multiplex at all). Every `pool.query()` does **attach → `VALUES 1` health check → execute → detach**, and every connection in the pool only ever runs one query at a time. With 1000 concurrent calls against a pool of 5, queries 6–1000 wait their turn — `RmPool` doesn't maintain a FIFO queue, instead relying on the per-attach health check delay to space attaches out (this timing dependency is proven by the [`pool-contention-proof`](../tests/performance/pool-contention-proof.test.ts) test suite). The pool therefore pays attach/detach + `VALUES 1` overhead on every query *and* throws away mapepire's native multiplexing at the same time.
+
+The net result: 5 mapepire connections each running queries serially with a `VALUES 1` ping per query is slower than 1 mapepire connection running everything concurrently via SQLJob multiplexing.
+
+The mirror image is true for idb. Pool beats Single at every scale (29 vs 35 ms at 50q, 465 vs 746 ms at 1000q) because idb genuinely cannot multiplex on a single connection — each CLI handle is one-query-at-a-time. Spreading 1000 queries across 5 CLI handles in the pool genuinely wins over funnelling them through one in the single-connection test.
+
+The opt-in `multiplex: true` flag on `RmPool` is what closes this gap for mapepire. With it set, each pool connection accepts unlimited concurrent in-flight queries via correlation IDs and the pool round-robins across all 5 connections — so you get the Single path's native multiplexing scaled across 5 connections. The [Three-way loopback](#three-way-loopback-rm-connector-js-serialized-vs-multiplex-vs-native-mapepire-pool) and [Remote](#remote-rm-connector-js-serialized-vs-multiplex-vs-native-mapepire-pool) sections below quantify the effect.
 
 ### Analysis
 
