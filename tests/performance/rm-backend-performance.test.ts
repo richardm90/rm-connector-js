@@ -16,7 +16,7 @@
  *     when true the idb branch of every test is skipped (idb cannot multiplex).
  *   - RM_KEEPALIVE (default unset/disabled) — keepalive interval in minutes;
  *     fractional values allowed; only meaningful for mapepire.
- *   - RM_POOL_SIZE (default 5) — pool maxSize / initialConnections.size.
+ *   Pool sizing is fixed across scenarios: maxSize=1000, initial=5, increment=5.
  *
  * Run via `bench-runs.sh` for the standard 3-runs × 3-query-counts harness,
  * or directly with `npm run test:performance -- --testPathPatterns=rm-backend-performance`.
@@ -44,8 +44,18 @@ const QUERY_COUNT = Number(process.env.QUERY_COUNT) || 50;
 /** Number of warm-up queries before measurement */
 const WARMUP_COUNT = 3;
 
-/** Pool size (configurable via RM_POOL_SIZE env var; default 5) */
-const POOL_SIZE = Number(process.env.RM_POOL_SIZE) || 5;
+/**
+ * Pool sizing — same across every rm scenario. The pool starts at 5
+ * connections and grows in increments of 5 up to a 1000-connection ceiling
+ * if demand forces it. In scenarios with the per-attach health check on
+ * (1, 3, 4) the rate-limiter behaviour means the pool effectively stays
+ * near 5; in Scenario 2 (onAttach=false) the pool grows under burst load
+ * because attach is no longer rate-limited. Sharing the same config across
+ * scenarios keeps the comparison apples-to-apples.
+ */
+const POOL_MAX_SIZE = 1000;
+const POOL_INITIAL_SIZE = 5;
+const POOL_INCREMENT_SIZE = 5;
 
 /** Per-attach health check (configurable via RM_ON_ATTACH env var; default true) */
 const RM_ON_ATTACH = process.env.RM_ON_ATTACH !== 'false';
@@ -59,8 +69,21 @@ const RM_KEEPALIVE: number | null =
     ? Number(process.env.RM_KEEPALIVE)
     : null;
 
+/**
+ * True only on IBM i, where idb-pconnector (a native addon) loads. On any
+ * other platform require() throws and the idb branch of every test is skipped
+ * so the mapepire side can still produce remote-from-workstation data.
+ */
+let idbAvailable = false;
+try {
+  require('idb-pconnector');
+  idbAvailable = true;
+} catch {
+  // idb-pconnector is not installable off IBM i; idb tests will be skipped.
+}
+
 /** When true, the idb branch of every test runs alongside mapepire */
-const RUN_IDB = !RM_MULTIPLEX;
+const RUN_IDB = !RM_MULTIPLEX && idbAvailable;
 
 /** SAMPLE schema name (configurable via SAMPLE_SCHEMA env var) */
 const SAMPLE_SCHEMA = process.env.SAMPLE_SCHEMA || 'SAMPLE';
@@ -115,8 +138,9 @@ function poolOpts(): { idb: PoolOptions | null; mapepire: PoolOptions } {
     backend: 'mapepire',
     creds: MAPEPIRE_CREDS,
     logLevel: 'none',
-    maxSize: POOL_SIZE,
-    initialConnections: { size: POOL_SIZE },
+    maxSize: POOL_MAX_SIZE,
+    initialConnections: { size: POOL_INITIAL_SIZE },
+    incrementConnections: { size: POOL_INCREMENT_SIZE },
     multiplex: RM_MULTIPLEX,
     healthCheck: { onAttach: RM_ON_ATTACH, keepalive: RM_KEEPALIVE },
   };
@@ -125,8 +149,9 @@ function poolOpts(): { idb: PoolOptions | null; mapepire: PoolOptions } {
       ? {
           backend: 'idb',
           logLevel: 'none',
-          maxSize: POOL_SIZE,
-          initialConnections: { size: POOL_SIZE },
+          maxSize: POOL_MAX_SIZE,
+          initialConnections: { size: POOL_INITIAL_SIZE },
+          incrementConnections: { size: POOL_INCREMENT_SIZE },
           healthCheck: { onAttach: RM_ON_ATTACH, keepalive: RM_KEEPALIVE },
         }
       : null,
@@ -208,7 +233,8 @@ function printResults(label: string, idbStats: Stats | null, mapepireStats: Stat
   }
   println(
     `  Queries: ${mapepireStats.count}, Warm-up: ${WARMUP_COUNT}, ` +
-      `pool=${POOL_SIZE}, multiplex=${RM_MULTIPLEX}, ` +
+      `pool=init:${POOL_INITIAL_SIZE} max:${POOL_MAX_SIZE} incr:${POOL_INCREMENT_SIZE}, ` +
+      `multiplex=${RM_MULTIPLEX}, ` +
       `onAttach=${RM_ON_ATTACH}, keepalive=${RM_KEEPALIVE === null ? 'off' : `${RM_KEEPALIVE}min`}`,
   );
 }
@@ -279,8 +305,23 @@ async function timePoolSequential(pool: RmPool, sql: string, count: number): Pro
   return { times, wallClock };
 }
 
-/** Time N concurrent queries using pool.query() via Promise.all */
-async function timePoolConcurrent(pool: RmPool, sql: string, count: number): Promise<TimingResult> {
+/**
+ * Time N concurrent queries using pool.query() via Promise.allSettled.
+ *
+ * Uses allSettled rather than all because Scenario 2 (onAttach=false) can
+ * exhaust the pool under high concurrency — the implicit rate-limiter is
+ * gone, so attach() throws "Maximum number of connections reached" once
+ * concurrent demand exceeds maxSize. We need to capture how many queries
+ * succeeded vs failed rather than abort on the first failure.
+ *
+ * Returns timing for the SUCCESSFUL queries plus a `failures` count.
+ * Wall clock spans the full batch (success or fail) end-to-end.
+ */
+async function timePoolConcurrent(
+  pool: RmPool,
+  sql: string,
+  count: number,
+): Promise<TimingResult & { failures: number }> {
   // Warm-up
   for (let i = 0; i < WARMUP_COUNT; i++) {
     await pool.query(sql);
@@ -289,7 +330,7 @@ async function timePoolConcurrent(pool: RmPool, sql: string, count: number): Pro
   const times: number[] = [];
   const wallStart = performance.now();
 
-  await Promise.all(
+  const results = await Promise.allSettled(
     Array.from({ length: count }, async () => {
       const start = performance.now();
       await pool.query(sql);
@@ -297,8 +338,13 @@ async function timePoolConcurrent(pool: RmPool, sql: string, count: number): Pro
     }),
   );
 
+  let failures = 0;
+  for (const r of results) {
+    if (r.status === 'rejected') failures += 1;
+  }
+
   const wallClock = performance.now() - wallStart;
-  return { times, wallClock };
+  return { times, wallClock, failures };
 }
 
 // ---------------------------------------------------------------------------
@@ -314,7 +360,9 @@ const describeIf = skip ? describe.skip : describe;
 // ---------------------------------------------------------------------------
 
 describeIf('rm-connector-js Backend Performance', () => {
-  jest.setTimeout(120_000);
+  // 10 minutes per test — needed for QUERY_COUNT=1000 over a remote network
+  // (the large result set query alone runs ~1000 round-trips of ~420 rows each).
+  jest.setTimeout(600_000);
 
   // -------------------------------------------------------------------
   // 1. Connection Creation
@@ -442,7 +490,7 @@ describeIf('rm-connector-js Backend Performance', () => {
         const mapTiming = await timePoolSequential(mapPool, SQL_STANDARD, QUERY_COUNT);
 
         printResults(
-          `Pool (${POOL_SIZE}) — Sequential (${SQL_STANDARD})`,
+          `Pool (init:${POOL_INITIAL_SIZE} max:${POOL_MAX_SIZE}) — Sequential (${SQL_STANDARD})`,
           idbTiming ? calcStats(idbTiming) : null,
           calcStats(mapTiming),
         );
@@ -469,10 +517,20 @@ describeIf('rm-connector-js Backend Performance', () => {
         const mapTiming = await timePoolConcurrent(mapPool, SQL_STANDARD, QUERY_COUNT);
 
         printResults(
-          `Pool (${POOL_SIZE}) — Promise.all (${SQL_STANDARD})`,
+          `Pool (init:${POOL_INITIAL_SIZE} max:${POOL_MAX_SIZE}) — Promise.all (${SQL_STANDARD})`,
           idbTiming ? calcStats(idbTiming) : null,
           calcStats(mapTiming),
         );
+        if (idbTiming && idbTiming.failures > 0) {
+          println(
+            `  ⚠️  idb: ${idbTiming.failures}/${QUERY_COUNT} queries failed (pool exhaustion)`,
+          );
+        }
+        if (mapTiming.failures > 0) {
+          println(
+            `  ⚠️  mapepire: ${mapTiming.failures}/${QUERY_COUNT} queries failed (pool exhaustion)`,
+          );
+        }
       } finally {
         await Promise.all([idbPool ? idbPool.close() : Promise.resolve(), mapPool.close()]);
       }

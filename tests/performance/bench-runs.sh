@@ -6,7 +6,7 @@
 # Phases (matching docs/PERFORMANCE-COMPARISON.md Section 4 scenarios):
 #   native             — Scenario 5 (native drivers baseline, no rm-connector-js wrapper)
 #   rm                 — Scenario 1 (rm default: onAttach=true, multiplex=false, pool=5)
-#   rm-no-onattach     — Scenario 2 (onAttach=false, multiplex=false, pool=50)
+#   rm-no-onattach     — Scenario 2 (onAttach=false, multiplex=false)
 #   rm-mux             — Scenario 3 (multiplex=true, pool=5)
 #   rm-mux-keepalive   — Scenario 4 (multiplex=true, keepalive=0.05, pool=5)
 #
@@ -84,7 +84,7 @@ case "$phase" in
     run_rm rm
     ;;
   rm-no-onattach)
-    run_rm rm-no-onattach RM_ON_ATTACH=false RM_POOL_SIZE=50
+    run_rm rm-no-onattach RM_ON_ATTACH=false
     ;;
   rm-mux)
     run_rm rm-mux RM_MULTIPLEX=true
