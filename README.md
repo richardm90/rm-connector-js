@@ -21,7 +21,7 @@ On top of the backend abstraction, the library delivers:
 
 - **Thread-Safe Attach** — A promise-chain mutex serializes connection checkout, preventing race conditions when multiple callers request connections simultaneously.
 
-- **Optional Multiplex Mode** — For mapepire workloads with concurrent queries, opt into `multiplex: true` and each pool connection will serve unlimited in-flight queries over mapepire's native ID-correlated WebSocket protocol, round-robin dispatched across pool members. Measured: up to 29x faster than the serialized default for concurrent bursts over a network, and 2.6x-5.4x faster than the native mapepire Pool on loopback. See [docs/PERFORMANCE-COMPARISON.md](docs/PERFORMANCE-COMPARISON.md#3b-multiplexing) for when to enable it.
+- **Optional Multiplex Mode** — For mapepire workloads with concurrent queries, opt into `multiplex: true` and each pool connection will serve unlimited in-flight queries over mapepire's native ID-correlated WebSocket protocol, round-robin dispatched across pool members. Measured: up to ~200× faster than the serialized default for concurrent bursts over a network, and 3×–12× faster than the native mapepire Pool on loopback. See [docs/PERFORMANCE-COMPARISON.md](docs/PERFORMANCE-COMPARISON.md#3b-multiplexing) for when to enable it.
 
 - **Multi-Pool Management** — Run up to 8 isolated pools (e.g., production, reporting, batch) under a single `RmPools` manager with independent configuration, credentials, and lifecycle.
 
